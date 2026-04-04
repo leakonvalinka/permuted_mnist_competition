@@ -1,6 +1,8 @@
 """
 Evaluate the softmax linear agent on the Permuted MNIST environment.
 """
+import os
+os.environ["CUDA_VISIBLE_DEVICES"] = ""
 import time
 import numpy as np
 from permuted_mnist.env.permuted_mnist import PermutedMNISTEnv
