@@ -1,14 +1,15 @@
-﻿import time
+# doesnt work
+
 import numpy as np
 import torch
 import torch.nn as nn
 
 
-_threads_configured = False
+_TORCH_THREADS_CONFIGURED = False
 
-def _set_resource_limits(num_threads: int = 2, num_interop_threads: int = 1) -> None:
-    global _threads_configured
-    if _threads_configured:
+def _configure_torch_threads_once(num_threads: int = 2, num_interop_threads: int = 1) -> None:
+    global _TORCH_THREADS_CONFIGURED
+    if _TORCH_THREADS_CONFIGURED:
         return
 
     torch.set_num_threads(num_threads)
@@ -18,7 +19,7 @@ def _set_resource_limits(num_threads: int = 2, num_interop_threads: int = 1) -> 
         # Can happen if parallel work has already started in this process.
         pass
 
-    _threads_configured = True
+    _TORCH_THREADS_CONFIGURED = True
 
 
 class MLP(nn.Module):
@@ -41,23 +42,27 @@ class MLP(nn.Module):
 
 
 class Agent:
+    """
+    CPU-only agent with no train/predict deadline.
+    Only `safety_margin_s` is kept as a configurable time-related setting.
+    """
+
     def __init__(
         self,
         seed: int = None,
         batch_size: int = 2048,
         max_epochs: int = 10_000,
         lr: float = 1.5e-3,
-        weight_decay: float = 1e-5,
+        weight_decay: float = 5e-5,
         dropout: float = 0.05,
-        episode_budget_s: float = 60.0,
-        safety_margin_s: float = 2.5, # time buffer
+        safety_margin_s: float = 1.5,
         predict_batch_size: int = 4096,
     ):
         if seed is not None:
             torch.manual_seed(seed)
 
-        # enforce "2 cores"
-        _set_resource_limits(num_threads=2, num_interop_threads=1)
+        # Enforce "2 cores" inside the process (important under Docker too)
+        _configure_torch_threads_once(num_threads=2, num_interop_threads=1)
 
         self.device = torch.device("cpu")
         self.model = MLP(dropout=dropout).to(self.device)
@@ -69,24 +74,18 @@ class Agent:
         self.batch_size = batch_size
         self.max_epochs = max_epochs
 
-        self.episode_budget_s = episode_budget_s
         self.safety_margin_s = safety_margin_s
         self.predict_batch_size = predict_batch_size
 
     def _prep_x(self, X: np.ndarray) -> torch.Tensor:
+        # Convert once; keep contiguous float32
         x = torch.from_numpy(X.reshape(len(X), -1)).to(dtype=torch.float32)
         x = x / 255.0
-        # mnist standardization
+        # MNIST standardization (fast, helps convergence)
         x = (x - 0.1307) / 0.3081
         return x
 
     def train(self, X_train: np.ndarray, y_train: np.ndarray):
-        t0 = time.perf_counter()
-
-        train_deadline = t0 + (self.episode_budget_s - self.safety_margin_s)
-        if train_deadline <= t0:
-            return
-
         X = self._prep_x(X_train).to(self.device)
         y = torch.from_numpy(y_train.ravel().astype(np.int64)).to(self.device)
 
@@ -97,9 +96,6 @@ class Agent:
             perm = torch.randperm(n)
 
             for i in range(0, n, self.batch_size):
-                if time.perf_counter() >= train_deadline:
-                    return
-
                 idx = perm[i : i + self.batch_size]
                 xb = X[idx]
                 yb = y[idx]
@@ -115,6 +111,8 @@ class Agent:
     def predict(self, X_test: np.ndarray) -> np.ndarray:
         X = self._prep_x(X_test).to(self.device)
         self.model.eval()
+
+        # Chunked prediction => more stable memory/time
         bs = self.predict_batch_size
         preds = []
 
