@@ -22,7 +22,7 @@ def _set_resource_limits(num_threads: int = 2, num_interop_threads: int = 1) -> 
 
 
 class MLP(nn.Module):
-    def __init__(self, dropout=0.10):
+    def __init__(self, dropout=0.0):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(784, 512),
@@ -52,9 +52,10 @@ class Agent:
         max_epochs: int = 10_000,
         lr: float = 3e-3,
         weight_decay: float = 1e-4,
-        dropout: float = 0.05,
+        dropout: float = 0.0,
+        aug_noise: float = 0.5,       # Gaussian noise std added to inputs during training
         episode_budget_s: float = 60.0,
-        safety_margin_s: float = 2.5, # time buffer
+        safety_margin_s: float = 2.5, # time buffer (includes predict + data prep)
         predict_batch_size: int = 4096,
     ):
         if seed is not None:
@@ -65,7 +66,7 @@ class Agent:
 
         self.device = torch.device("cpu")
         self.model = MLP(dropout=dropout).to(self.device)
-        self.criterion = nn.CrossEntropyLoss(label_smoothing=0.05)
+        self.criterion = nn.CrossEntropyLoss(label_smoothing=0.10)
         self.optimizer = torch.optim.AdamW(
             self.model.parameters(), lr=lr, weight_decay=weight_decay
         )
@@ -76,6 +77,7 @@ class Agent:
 
         self.batch_size = batch_size
         self.max_epochs = max_epochs
+        self.aug_noise = aug_noise
 
         self.episode_budget_s = episode_budget_s
         self.safety_margin_s = safety_margin_s
@@ -110,10 +112,12 @@ class Agent:
 
                 idx = perm[i : i + self.batch_size]
                 xb = X[idx]
-                yb = y[idx]
+                # Gaussian noise augmentation: regularises and matches eval-time noise
+                if self.aug_noise > 0.0:
+                    xb = xb + torch.randn_like(xb) * self.aug_noise
 
                 logits = self.model(xb)
-                loss = self.criterion(logits, yb)
+                loss = self.criterion(logits, y[idx])
 
                 self.optimizer.zero_grad(set_to_none=True)
                 loss.backward()
