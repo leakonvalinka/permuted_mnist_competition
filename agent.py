@@ -1,4 +1,4 @@
-﻿import time
+import time
 import numpy as np
 import torch
 import torch.nn as nn
@@ -27,13 +27,17 @@ class MLP(nn.Module):
         self.net = nn.Sequential(
             nn.Linear(784, 512),
             nn.BatchNorm1d(512),
-            nn.ReLU(inplace=True),
+            nn.GELU(),
             nn.Dropout(dropout),
             nn.Linear(512, 512),
             nn.BatchNorm1d(512),
-            nn.ReLU(inplace=True),
+            nn.GELU(),
             nn.Dropout(dropout),
-            nn.Linear(512, 10),
+            nn.Linear(512, 256),
+            nn.BatchNorm1d(256),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(256, 10),
         )
 
     def forward(self, x):
@@ -44,10 +48,10 @@ class Agent:
     def __init__(
         self,
         seed: int = None,
-        batch_size: int = 2048,
+        batch_size: int = 512,
         max_epochs: int = 10_000,
-        lr: float = 1.5e-3,
-        weight_decay: float = 1e-5,
+        lr: float = 3e-3,
+        weight_decay: float = 1e-4,
         dropout: float = 0.05,
         episode_budget_s: float = 60.0,
         safety_margin_s: float = 2.5, # time buffer
@@ -61,9 +65,13 @@ class Agent:
 
         self.device = torch.device("cpu")
         self.model = MLP(dropout=dropout).to(self.device)
-        self.criterion = nn.CrossEntropyLoss(label_smoothing=0.03)
+        self.criterion = nn.CrossEntropyLoss(label_smoothing=0.05)
         self.optimizer = torch.optim.AdamW(
             self.model.parameters(), lr=lr, weight_decay=weight_decay
+        )
+        # Cosine annealing with warm restarts to escape local minima
+        self.scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+            self.optimizer, T_0=10, T_mult=2, eta_min=1e-5
         )
 
         self.batch_size = batch_size
@@ -93,7 +101,7 @@ class Agent:
         n = X.shape[0]
         self.model.train()
 
-        for _epoch in range(self.max_epochs):
+        for epoch in range(self.max_epochs):
             perm = torch.randperm(n)
 
             for i in range(0, n, self.batch_size):
@@ -110,6 +118,8 @@ class Agent:
                 self.optimizer.zero_grad(set_to_none=True)
                 loss.backward()
                 self.optimizer.step()
+
+            self.scheduler.step(epoch)
 
     @torch.no_grad()
     def predict(self, X_test: np.ndarray) -> np.ndarray:
